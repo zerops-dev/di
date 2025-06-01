@@ -1,0 +1,254 @@
+package auto
+
+// {{ Filename "gen" }}
+import (
+{{range .GetImports }}  {{.}}
+{{end}})
+
+type Config struct {
+    {{range .Configs }}
+        {{.InitName}} {{.OutputTypeStar}}{{end}}
+}
+
+func NewConfig(prefix string,
+	configurator *configurator.Handler,
+) *Config {
+    c := &Config{
+	{{range .Configs}}	  {{.InitName}}: ({{.OutputTypeStar}})({{.InitFunc}}()),
+{{end}}
+    }
+    {{range .Configs}}    configurator.Register(concat(prefix, "{{.ConfigPath}}"), &c.{{.InitName}})
+    {{end}}
+	return c
+}
+
+
+{{range .Configs }}
+
+type {{.InitName}} {{.OutputType}}
+
+func Get{{.InitName}}(c Config) {{.InitName}} {
+	return {{.InitName}}(c.{{.InitName}})
+}
+{{end}}
+
+
+type AppConfig struct {
+	configurator *configurator.Handler
+	config       *Config
+}
+
+func NewAppConfig(prefix string, cmd *cobra.Command) *AppConfig {
+	configurator := configurator.New(cmd{{if not .RegisterFlags}}, configurator.WithRegisterFlags(false){{end}})
+	return &AppConfig{
+		configurator: configurator,
+		config:       NewConfig(prefix, configurator),
+	}
+}
+
+func (c *AppConfig) Read(app *app.ApplicationSetup, cmd *cobra.Command) error {
+	return c.configurator.Read(app, cmd)
+}
+
+func (c *AppConfig) Configurator() *configurator.Handler {
+	return c.configurator
+}
+
+func (c *AppConfig) Register(prefix string, in interface{}) {
+	c.configurator.Register(prefix, in)
+}
+
+func (c *AppConfig) ConfigCommand(app *app.ApplicationSetup) *cobra.Command {
+	return c.configurator.ConfigCommand(app)
+}
+
+func (c *AppConfig) Config() Config {
+	return *c.config
+}
+
+func concat(parts ...string) string {
+	var result []string
+	for _, part := range parts {
+		p := strings.TrimPrefix(part, "<")
+		if strings.HasPrefix(part, "<") && len(result) > 0 {
+			result[len(result)-1] = p
+		} else {
+			result = append(result, p)
+		}
+	}
+	return strings.Join(result, ".")
+}
+
+{{range .Services }}
+
+type {{.InitName}} {{.OutputType}}
+
+func Get{{.InitName}}({{range .Dependencies}}{{.InitName}} {{.TypeStar}},
+        {{end}}) ({{.InitNameStar}}{{if .InitFuncWithError}}, error{{end}}) {
+	{{if .InitFuncWithError}}
+	v, err := {{.InitFunc}}({{range .Dependencies}}({{.InitTypeStar}})({{.TransformationStart}} {{.InitName}} {{.TransformationEnd}}),
+                                                  	{{end}})
+   	return ({{.InitNameStar}})(v), err
+	{{else}}
+	return ({{.InitNameStar}})({{.InitFunc}}({{range .Dependencies}}({{.InitTypeStar}})({{.TransformationStart}} {{.InitName}} {{.TransformationEnd}}),
+	{{end}}))
+	{{end}}
+
+
+}
+{{end}}
+
+{{range $index, $element := .Setters -}}
+
+type setter_{{$index}} struct {}
+type setter_{{$index}}_Value {{$element.Setter.Type}}
+
+func getSetter_{{$index}}_Value(target {{$element.Target.InitNameStar}}) (setter_{{$index}}_Value, error) {
+	{{if $element.IsInterface}}
+	if i, isI := target.(setter_{{$index}}_Value); isI {
+		return i, nil
+	}
+	return nil, errors.New("passed object {{$element.Source.InitTypeStar}} doesn't implements requested interface {{$element.Target.InitTypeStar}}")
+	{{else}}
+	return (setter_{{$index}}_Value)(({{$element.Target.InitTypeStar}})(target)), nil
+	{{end}}
+}
+
+func setSetter_{{$index}}(source {{$element.Source.InitNameStar}}, target setter_{{$index}}_Value) {{if $element.Setter.ReturnErr }}(*setter_{{$index}}, error){{else}}*setter_{{$index}}{{end}} {
+	{{if $element.IsInterface}}
+	if i, isI := target.(setter_{{$index}}_Value); isI {
+		{{if $element.Setter.ReturnErr }}
+			return &setter_{{$index}}{}, {{$element.Setter.Call}}(({{$element.Source.InitTypeStar}})(source), i)
+		{{ else }}
+			{{$element.Setter.Call}}(({{$element.Source.InitTypeStar}})(source), i)
+			return &setter_{{$index}}{}
+		{{end}}
+	}
+	return &setter_{{$index}}{}{{if $element.Setter.ReturnErr }}, nil{{end}}
+	{{else}}
+		{{if $element.Setter.ReturnErr }}
+			return &setter_{{$index}}{}, {{$element.Setter.Call}}(({{$element.Source.InitTypeStar}})(source), target)
+		{{ else }}
+			{{$element.Setter.Call}}(({{$element.Source.InitTypeStar}})(source), target)
+			return &setter_{{$index}}{}
+		{{end}}
+	{{end}}
+}
+
+{{end}}
+var DepSet = wire.NewSet(
+    app.Set,
+	NewApplication,
+	{{- range $index, $element := .Setters -}}
+	getSetter_{{$index}}_Value, setSetter_{{$index}},
+	{{end -}}
+    {{range .Services}}   Get{{.InitName}},
+    {{end}}
+        {{range .Configs}}   Get{{.InitName}},
+    {{end}}
+)
+
+func NewApplication(
+	systemApp *app.ApplicationSetup,
+	{{- range $index, $element := .Setters -}}
+	_ *setter_{{$index}},
+	{{end -}}
+    {{range $index, $element := .Services -}}
+    	{{ if ne .AppInject "_" -}}
+		{{.AppInjectIndexed}}{{ $index }} {{.InitNameStar}},
+		{{ else -}}
+		_ {{.InitNameStar}},
+		{{ end -}}
+    {{end -}}
+) *App {
+	return &App{
+		app:    systemApp,
+		{{range $index, $element := .Services -}}
+			{{ if ne .AppInject "_" -}}
+			{{.AppInject}}: ({{.InitTypeStar}})({{ .AppInjectIndexed }}{{ $index }}),
+			{{end -}}
+    	{{end -}}
+	}
+}
+
+type App struct {
+	app    *app.ApplicationSetup
+	{{range .Services -}}
+		{{ if ne .AppInject "_" -}}
+		{{.AppInject}} {{.InitTypeStar}}
+		{{end -}}
+    {{end -}}
+}
+
+{{range .Services -}}
+	{{ if ne .AppInject "_" -}}
+func (h *App) Get{{ .AppInject | FirstToUpper }}() {{.InitTypeStar}} {
+	return h.{{ .AppInject }}
+}
+	{{end -}}
+
+    {{if and (ne .AppInject "_") $.RunCommandOnce (not $.SkipRunCommand) -}}
+func (h *App) Has{{ .AppInject | FirstToUpper }}() bool {
+    {{ if .RunOnce -}}
+    return true
+        {{else -}}
+    return false
+    {{end -}}
+}
+    {{end -}}
+{{end -}}
+
+func (h *App) Run() error {
+{{ if and .RunCommandOnce (not .SkipRunCommand) -}}
+    if h.Has__runCommand() {
+        return h.runner.RunOnce(h.app.Context, h.app.Cancel, func () error {
+            return h.Get__runCommand().Run(h.app.Context, h.app.Cancel)
+        })
+    } else {
+        panic("Run command is not implemented")
+    }
+{{else -}}
+    return h.runner.RunWithSigTerm(h.app.Context, h.app.Cancel)
+{{end -}}
+}
+
+{{if not .SkipRunCommand }}
+func CreateCommand(app *app.ApplicationSetup) *cobra.Command {
+
+	cmd := &cobra.Command{
+		Use:   {{GoValue .Command}},
+		Short: {{GoValue .CommandShort}},
+		Long:  {{GoValue .CommandLong}},
+	}
+
+	cfg := NewAppConfig({{GoValue .ConfigPrefix}}, cmd)
+
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		if err := cfg.Read(app, cmd); err != nil {
+			return err
+		}
+
+        {{ if .OmitConstructErr }}
+		application := CreateApp(app, cfg.Config())
+		{{ else }}
+		application, err := CreateApp(app, cfg.Config())
+		if err != nil {
+			panic(err)
+		}
+		{{ end -}}
+
+		{{ if .LogPanic }}
+		if app.ForkForPanicLogging() {
+			return panicCatcher.WrapAppProcess(app.Context, application)
+		} else {
+			return application.Run()
+		}
+		{{ else -}}
+		return application.Run()
+		{{ end -}}
+	}
+	cmd.AddCommand(cfg.ConfigCommand(app))
+
+	return cmd
+}
+{{end}}
